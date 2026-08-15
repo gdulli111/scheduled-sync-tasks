@@ -97,6 +97,14 @@ def owner_deltas(meta):
         if tb.get("owner")==WALLET: post[tb["mint"]] = tb["uiTokenAmount"]["uiAmount"] or 0.0
     return {m: post.get(m,0.0)-pre.get(m,0.0) for m in set(pre)|set(post)}
 
+def native_sol_delta(tx):
+    """WALLET's native SOL change in this tx (negative = spent)."""
+    m = tx["meta"]; keys = [k["pubkey"] for k in tx["transaction"]["message"]["accountKeys"]]
+    if WALLET in keys:
+        i = keys.index(WALLET)
+        return (m["postBalances"][i] - m["preBalances"][i]) / 1e9
+    return 0.0
+
 def current_mints():
     """All mints the wallet currently holds (both token programs)."""
     mints = set()
@@ -140,8 +148,14 @@ def main():
         usdc_spent = max(0.0, -deltas.get("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",0.0)) \
                    + max(0.0, -deltas.get("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",0.0))
         wsol_spent = max(0.0, -deltas.get("So11111111111111111111111111111111111111112",0.0))
+        native_spent = max(0.0, -native_sol_delta(tx))
+        # Real BUY only if he actually PAID (spent SOL/USDC/WSOL). Airdrops/transfers-in pay nothing.
+        paid = (usdc_spent > 0.01) or (wsol_spent > 1e-4) or (native_spent > 0.002)
         for mint, dv in deltas.items():
             if mint in QUOTE or dv <= 1e-9: continue   # only tokens he RECEIVED
+            if not paid:
+                log(f"IGNORED airdrop/transfer-in {dv:,.4f} {mint[:6]}… (no payment) at {ts} {sig}")
+                continue
             sym, price = dexscreener(mint)
             usd = (dv*price) if price else 0.0
             if not usd:  # fall back to quote spent
