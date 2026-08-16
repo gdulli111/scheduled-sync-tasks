@@ -27,7 +27,25 @@ TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
 QUOTE = {"So11111111111111111111111111111111111111112",   # WSOL
          "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",   # USDC
          "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}   # USDT
-THRESHOLD_USD = 500.0
+THRESHOLD_USD   = 500.0
+ALERT_EVERY_BUY = True    # alert on EVERY real (paid) buy, any size, new or existing.
+ALERT_SELLS     = True    # alert when he swaps a token OUT for SOL/USDC (a sell), any size.
+ALERT_MONEY_IN  = True    # alert when SOL/USDC/USDT ARRIVES (not part of a buy/sell) — funding in.
+MONEYIN_USD_MIN = 1.0     # ignore sub-$ dust inflows / tiny sell proceeds.
+SOL_MINT  = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+# Known Solana centralized-exchange hot/withdrawal wallets. Best-effort seed list — send me
+# Solscan-labelled addresses to expand it. Money-in from these is labelled with the exchange name.
+EXCHANGE_ADDRESSES = {
+    "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9": "Binance",
+    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM": "Binance",
+    "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm": "Coinbase",
+    "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS": "Coinbase",
+    "GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE": "Coinbase",
+    "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiouN5": "Kraken",
+    "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2": "Bybit",
+}
 _price_cache = {}
 
 def log(msg):
@@ -125,6 +143,30 @@ def native_sol_delta(tx, wallet):
         return (m["postBalances"][i] - m["preBalances"][i]) / 1e9
     return 0.0
 
+def spl_sender(meta, wallet, mints):
+    """Owner (≠wallet) whose balance in any of `mints` dropped most this tx = the sender."""
+    pre, post = {}, {}
+    for b in meta.get("preTokenBalances", []):
+        if b.get("mint") in mints and b.get("owner"): pre[b["owner"]] = pre.get(b["owner"],0.0) + (b["uiTokenAmount"]["uiAmount"] or 0.0)
+    for b in meta.get("postTokenBalances", []):
+        if b.get("mint") in mints and b.get("owner"): post[b["owner"]] = post.get(b["owner"],0.0) + (b["uiTokenAmount"]["uiAmount"] or 0.0)
+    cand, drop = None, -1e-9
+    for o in set(pre)|set(post):
+        if o == wallet: continue
+        d = post.get(o,0.0) - pre.get(o,0.0)
+        if d < drop: drop, cand = d, o
+    return cand
+
+def native_sender(tx, wallet):
+    """AccountKey (≠wallet) whose native SOL dropped most this tx = the SOL sender."""
+    m = tx["meta"]; keys = [k["pubkey"] for k in tx["transaction"]["message"]["accountKeys"]]
+    cand, drop = None, -1e-9
+    for i, k in enumerate(keys):
+        if k == wallet: continue
+        d = (m["postBalances"][i] - m["preBalances"][i]) / 1e9
+        if d < drop: drop, cand = d, k
+    return cand
+
 def current_mints(wallet):
     """All mints the wallet currently holds (both token programs)."""
     mints = set()
@@ -188,8 +230,36 @@ def process_wallet(w, ws):
             known.add(mint)
             lbl = sym or (mint[:6]+"…")
             log(f"[{label}] BUY {dv:,.4f} {lbl} (~${usd:,.0f}) new={is_new} at {ts} {sig}")
-            if is_new or usd >= THRESHOLD_USD:
+            if ALERT_EVERY_BUY or is_new or usd >= THRESHOLD_USD:
                 alerts.append({"who":label,"new":is_new,"sym":sym,"mint":mint,"amt":dv,"usd":usd,"ts":ts,"sig":sig})
+
+        # --- SELL & MONEY-IN detection (tx-level, mutually exclusive with a BUY) ---
+        _, solp = dexscreener(SOL_MINT); solp = solp or 0.0
+        native_d = native_sol_delta(tx, wallet)
+        wsol_d   = deltas.get(SOL_MINT, 0.0)
+        usdc_d   = deltas.get(USDC_MINT, 0.0) + deltas.get(USDT_MINT, 0.0)
+        token_in  = [(m,v) for m,v in deltas.items() if m not in QUOTE and v >  1e-9]
+        token_out = [(m,v) for m,v in deltas.items() if m not in QUOTE and v < -1e-9]
+        quote_in_usd  = max(0.0, native_d)*solp + max(0.0, wsol_d)*solp + max(0.0, usdc_d)
+        quote_out_usd = max(0.0,-native_d)*solp + max(0.0,-wsol_d)*solp + max(0.0,-usdc_d)
+
+        if ALERT_SELLS and token_out and not token_in and quote_in_usd >= MONEYIN_USD_MIN:
+            # he swapped a token OUT for SOL/USDC — a sell
+            for mint, dv in token_out:
+                sym, price = dexscreener(mint); lbl = sym or (mint[:6]+"…")
+                log(f"[{label}] SELL {-dv:,.4f} {lbl} (~${quote_in_usd:,.0f}) at {ts} {sig}")
+                alerts.append({"who":label,"sell":True,"sym":sym,"mint":mint,"amt":-dv,"usd":quote_in_usd,"ts":ts,"sig":sig})
+
+        elif ALERT_MONEY_IN and not token_in and not token_out \
+             and quote_in_usd >= MONEYIN_USD_MIN and quote_out_usd <= 0.01:
+            # value ARRIVED without any token being bought or sold = funding-in
+            if usdc_d > 0: src = spl_sender(tx["meta"], wallet, {USDC_MINT, USDT_MINT})
+            else:          src = native_sender(tx, wallet)
+            exch = EXCHANGE_ADDRESSES.get(src or "")
+            asset = f"{max(native_d,0.0)+max(wsol_d,0.0):,.3f} SOL" if (max(native_d,0.0)+max(wsol_d,0.0))*solp >= usdc_d else f"{usdc_d:,.2f} USDC"
+            frm = exch or (f"wallet {src[:4]}…{src[-4:]}" if src else "unknown")
+            log(f"[{label}] MONEY-IN {asset} (~${quote_in_usd:,.0f}) from {frm} at {ts} {sig}")
+            alerts.append({"who":label,"money_in":True,"exch":exch,"src":src,"asset":asset,"usd":quote_in_usd,"ts":ts,"sig":sig})
 
     ws["seen"]=list(seen); ws["known_mints"]=list(known)
     if not alerts:
@@ -209,18 +279,34 @@ def main():
 
     for a in all_alerts:
         who = a["who"]
-        label = a["sym"] or (a["mint"][:8]+"…")
-        usd = f"~${a['usd']:,.0f}" if a["usd"] else "~$?"
-        if a["new"]:
-            title = f"🆕 {who} APED a NEW token: {label}"
-            tags  = "seedling,rotating_light"
-        else:
-            title = f"{who} bought {label} — {usd}"
-            tags  = "rotating_light,money_with_wings"
-        body = (f"{who} just bought {a['amt']:,.0f} {label} for {usd} at {a['ts']}.\n"
-                f"Token: {a['mint']}\nhttps://solscan.io/tx/{a['sig']}")
-        notify_phone(title, body, tags); notify_mac(title, f"{a['amt']:,.0f} {label} ({usd})")
-        log(f"ALERTED [{'NEW' if a['new'] else 'BIG'}] {who}: {title}")
+        usd = f"~${a['usd']:,.0f}" if a.get("usd") else "~$?"
+        link = f"https://solscan.io/tx/{a['sig']}"
+        if a.get("money_in"):                       # funds arriving
+            frm = a["exch"] or (f"wallet {a['src'][:4]}…{a['src'][-4:]}" if a.get("src") else "unknown")
+            kind = "EXCH-IN" if a["exch"] else "IN"
+            title = f"💰 {who} received {a['asset']} ({usd}) from {frm}"
+            tags  = "moneybag,inbox_tray"
+            body  = f"{who} received {a['asset']} ({usd}) from {frm} at {a['ts']}.\n{link}"
+            banner = f"{a['asset']} from {frm}"
+        elif a.get("sell"):                          # token sold for SOL/USDC
+            lbl = a["sym"] or (a["mint"][:8]+"…")
+            kind = "SELL"
+            title = f"🔻 {who} SOLD {lbl} — {usd}"
+            tags  = "small_red_triangle_down,money_with_wings"
+            body  = (f"{who} sold {a['amt']:,.0f} {lbl} for {usd} at {a['ts']}.\n"
+                     f"Token: {a['mint']}\n{link}")
+            banner = f"{a['amt']:,.0f} {lbl} ({usd})"
+        else:                                        # buy
+            lbl = a["sym"] or (a["mint"][:8]+"…")
+            if a.get("new"):
+                kind = "NEW"; title = f"🆕 {who} APED a NEW token: {lbl}"; tags = "seedling,rotating_light"
+            else:
+                kind = "BUY"; title = f"🟢 {who} bought {lbl} — {usd}"; tags = "large_green_circle,money_with_wings"
+            body  = (f"{who} just bought {a['amt']:,.0f} {lbl} for {usd} at {a['ts']}.\n"
+                     f"Token: {a['mint']}\n{link}")
+            banner = f"{a['amt']:,.0f} {lbl} ({usd})"
+        notify_phone(title, body, tags); notify_mac(title, banner)
+        log(f"ALERTED [{kind}] {who}: {title}")
 
 if __name__ == "__main__":
     try: main()
