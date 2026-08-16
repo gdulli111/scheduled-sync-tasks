@@ -15,7 +15,11 @@ def _topic():
     return open(p).read().strip() if os.path.exists(p) else ""
 TOPIC = _topic()
 
-WALLET   = "5GmQHd4vQ2eeGHTr6ifEDYG8aHNxBiv14XK9cQvNvfGS"
+# Wallets to track. Add more dicts here to watch additional wallets.
+WALLETS = [
+    {"label": "DONJO",   "address": "5GmQHd4vQ2eeGHTr6ifEDYG8aHNxBiv14XK9cQvNvfGS"},
+    {"label": "FrankDOG","address": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ"},
+]
 RPC      = "https://api.mainnet-beta.solana.com"
 UA       = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
@@ -64,14 +68,30 @@ def dexscreener(mint):
     _price_cache[mint] = res
     return res
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try: return json.load(open(STATE_FILE))
-        except Exception: pass
+def _blank_wallet_state():
     return {"seen": [], "known_mints": [], "initialized": False}
 
+def load_state():
+    st = {}
+    if os.path.exists(STATE_FILE):
+        try: st = json.load(open(STATE_FILE))
+        except Exception: st = {}
+    # Migrate legacy flat single-wallet state -> per-wallet under the first wallet (DONJO).
+    if "wallets" not in st:
+        legacy = {"seen": st.get("seen", []),
+                  "known_mints": st.get("known_mints", []),
+                  "initialized": st.get("initialized", False)}
+        st = {"wallets": {}}
+        if legacy["initialized"] or legacy["seen"] or legacy["known_mints"]:
+            st["wallets"][WALLETS[0]["address"]] = legacy
+            log(f"Migrated legacy state into wallet slot {WALLETS[0]['label']}.")
+    for w in WALLETS:
+        st["wallets"].setdefault(w["address"], _blank_wallet_state())
+    return st
+
 def save_state(st):
-    st["seen"] = st["seen"][-1000:]
+    for addr, ws in st["wallets"].items():
+        ws["seen"] = ws["seen"][-1000:]
     json.dump(st, open(STATE_FILE, "w"))
 
 def notify_phone(title, message, tags):
@@ -88,73 +108,74 @@ def notify_mac(title, message):
     try: subprocess.run(["osascript","-e",f'display notification "{m}" with title "{t}" sound name "Glass"'], timeout=10)
     except Exception: pass
 
-def owner_deltas(meta):
-    """mint -> (post-pre) uiAmount for balances owned by WALLET."""
+def owner_deltas(meta, wallet):
+    """mint -> (post-pre) uiAmount for balances owned by wallet."""
     pre, post = {}, {}
     for tb in meta.get("preTokenBalances", []):
-        if tb.get("owner")==WALLET: pre[tb["mint"]] = tb["uiTokenAmount"]["uiAmount"] or 0.0
+        if tb.get("owner")==wallet: pre[tb["mint"]] = tb["uiTokenAmount"]["uiAmount"] or 0.0
     for tb in meta.get("postTokenBalances", []):
-        if tb.get("owner")==WALLET: post[tb["mint"]] = tb["uiTokenAmount"]["uiAmount"] or 0.0
+        if tb.get("owner")==wallet: post[tb["mint"]] = tb["uiTokenAmount"]["uiAmount"] or 0.0
     return {m: post.get(m,0.0)-pre.get(m,0.0) for m in set(pre)|set(post)}
 
-def native_sol_delta(tx):
-    """WALLET's native SOL change in this tx (negative = spent)."""
+def native_sol_delta(tx, wallet):
+    """wallet's native SOL change in this tx (negative = it spent SOL)."""
     m = tx["meta"]; keys = [k["pubkey"] for k in tx["transaction"]["message"]["accountKeys"]]
-    if WALLET in keys:
-        i = keys.index(WALLET)
+    if wallet in keys:
+        i = keys.index(wallet)
         return (m["postBalances"][i] - m["preBalances"][i]) / 1e9
     return 0.0
 
-def current_mints():
+def current_mints(wallet):
     """All mints the wallet currently holds (both token programs)."""
     mints = set()
     for prog in TOKEN_PROGRAMS:
-        res = rpc("getTokenAccountsByOwner", [WALLET, {"programId": prog}, {"encoding":"jsonParsed"}])
+        res = rpc("getTokenAccountsByOwner", [wallet, {"programId": prog}, {"encoding":"jsonParsed"}])
         if res:
             for a in res.get("value", []):
                 try: mints.add(a["account"]["data"]["parsed"]["info"]["mint"])
                 except Exception: pass
     return mints
 
-def main():
-    st = load_state()
-    seen = set(st.get("seen", [])); known = set(st.get("known_mints", []))
-    sigs = rpc("getSignaturesForAddress", [WALLET, {"limit": 100}])
-    if sigs is None: log("RPC unreachable; skip run."); return
+def process_wallet(w, ws):
+    """Scan one wallet; return list of alert dicts (each tagged with the wallet label)."""
+    label, wallet = w["label"], w["address"]
+    seen = set(ws.get("seen", [])); known = set(ws.get("known_mints", []))
+    sigs = rpc("getSignaturesForAddress", [wallet, {"limit": 100}])
+    if sigs is None: log(f"[{label}] RPC unreachable; skip run."); return []
 
-    if not st.get("initialized"):
-        known |= current_mints()
-        st["seen"] = [s["signature"] for s in sigs]
-        st["known_mints"] = list(known); st["initialized"] = True; save_state(st)
-        log(f"Initialized wallet-wide. Seeded {len(sigs)} sigs, {len(known)} known mints. Watching forward.")
-        return
+    if not ws.get("initialized"):
+        known |= current_mints(wallet)
+        ws["seen"] = [s["signature"] for s in sigs]
+        ws["known_mints"] = list(known); ws["initialized"] = True
+        log(f"[{label}] Initialized wallet-wide. Seeded {len(sigs)} sigs, {len(known)} known mints. Watching forward.")
+        return []
 
     new = [s for s in sigs if s["signature"] not in seen and not s.get("err")]
     if not new:
         for s in sigs: seen.add(s["signature"])
-        st["seen"]=list(seen); st["known_mints"]=list(known); save_state(st)
-        log("No new transactions."); return
+        ws["seen"]=list(seen); ws["known_mints"]=list(known)
+        log(f"[{label}] No new transactions."); return []
 
     alerts = []
     for s in reversed(new):  # oldest first
         sig = s["signature"]
         tx = rpc("getTransaction", [sig, {"encoding":"jsonParsed","maxSupportedTransactionVersion":0}])
         seen.add(sig)
-        if not tx: seen.discard(sig); log(f"fetch failed {sig}; retry next run"); continue
+        if not tx: seen.discard(sig); log(f"[{label}] fetch failed {sig}; retry next run"); continue
         bt = s.get("blockTime")
         ts = datetime.datetime.fromtimestamp(bt, datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC") if bt else "?"
-        deltas = owner_deltas(tx["meta"])
+        deltas = owner_deltas(tx["meta"], wallet)
         # USD spent this tx (quote side), best-effort
         usdc_spent = max(0.0, -deltas.get("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",0.0)) \
                    + max(0.0, -deltas.get("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",0.0))
         wsol_spent = max(0.0, -deltas.get("So11111111111111111111111111111111111111112",0.0))
-        native_spent = max(0.0, -native_sol_delta(tx))
-        # Real BUY only if he actually PAID (spent SOL/USDC/WSOL). Airdrops/transfers-in pay nothing.
+        native_spent = max(0.0, -native_sol_delta(tx, wallet))
+        # Real BUY only if it actually PAID (spent SOL/USDC/WSOL). Airdrops/transfers-in pay nothing.
         paid = (usdc_spent > 0.01) or (wsol_spent > 1e-4) or (native_spent > 0.002)
         for mint, dv in deltas.items():
-            if mint in QUOTE or dv <= 1e-9: continue   # only tokens he RECEIVED
+            if mint in QUOTE or dv <= 1e-9: continue   # only tokens it RECEIVED
             if not paid:
-                log(f"IGNORED airdrop/transfer-in {dv:,.4f} {mint[:6]}… (no payment) at {ts} {sig}")
+                log(f"[{label}] IGNORED airdrop/transfer-in {dv:,.4f} {mint[:6]}… (no payment) at {ts} {sig}")
                 continue
             sym, price = dexscreener(mint)
             usd = (dv*price) if price else 0.0
@@ -165,28 +186,41 @@ def main():
                     usd = wsol_spent*(solp or 0)
             is_new = mint not in known
             known.add(mint)
-            label = sym or (mint[:6]+"…")
-            log(f"BUY {dv:,.4f} {label} (~${usd:,.0f}) new={is_new} at {ts} {sig}")
+            lbl = sym or (mint[:6]+"…")
+            log(f"[{label}] BUY {dv:,.4f} {lbl} (~${usd:,.0f}) new={is_new} at {ts} {sig}")
             if is_new or usd >= THRESHOLD_USD:
-                alerts.append({"new":is_new,"sym":sym,"mint":mint,"amt":dv,"usd":usd,"ts":ts,"sig":sig})
+                alerts.append({"who":label,"new":is_new,"sym":sym,"mint":mint,"amt":dv,"usd":usd,"ts":ts,"sig":sig})
 
-    st["seen"]=list(seen); st["known_mints"]=list(known); save_state(st)
+    ws["seen"]=list(seen); ws["known_mints"]=list(known)
+    if not alerts:
+        log(f"[{label}] {len(new)} new txns, nothing alert-worthy (no new tokens, none ≥ ${THRESHOLD_USD:.0f}).")
+    return alerts
 
-    for a in alerts:
+def main():
+    st = load_state()
+    all_alerts = []
+    for w in WALLETS:
+        ws = st["wallets"][w["address"]]
+        try:
+            all_alerts += process_wallet(w, ws)
+        except Exception as e:
+            log(f"[{w['label']}] ERROR: {type(e).__name__}: {e}")
+    save_state(st)
+
+    for a in all_alerts:
+        who = a["who"]
         label = a["sym"] or (a["mint"][:8]+"…")
         usd = f"~${a['usd']:,.0f}" if a["usd"] else "~$?"
         if a["new"]:
-            title = f"🆕 DONJO APED a NEW token: {label}"
+            title = f"🆕 {who} APED a NEW token: {label}"
             tags  = "seedling,rotating_light"
         else:
-            title = f"DONJO bought {label} — {usd}"
+            title = f"{who} bought {label} — {usd}"
             tags  = "rotating_light,money_with_wings"
-        body = (f"DONJO just bought {a['amt']:,.0f} {label} for {usd} at {a['ts']}.\n"
+        body = (f"{who} just bought {a['amt']:,.0f} {label} for {usd} at {a['ts']}.\n"
                 f"Token: {a['mint']}\nhttps://solscan.io/tx/{a['sig']}")
         notify_phone(title, body, tags); notify_mac(title, f"{a['amt']:,.0f} {label} ({usd})")
-        log(f"ALERTED [{'NEW' if a['new'] else 'BIG'}]: {title}")
-    if not alerts:
-        log(f"{len(new)} new txns, nothing alert-worthy (no new tokens, none ≥ ${THRESHOLD_USD:.0f}).")
+        log(f"ALERTED [{'NEW' if a['new'] else 'BIG'}] {who}: {title}")
 
 if __name__ == "__main__":
     try: main()
