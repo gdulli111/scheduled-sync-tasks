@@ -114,10 +114,13 @@ def save_state(st):
 
 def notify_phone(title, message, tags):
     if not TOPIC: log("no NTFY_TOPIC; cannot push"); return
+    # HTTP headers must be latin-1; strip emoji/non-latin-1 from Title (the Tags field
+    # still gives ntfy an emoji icon). Emoji stays intact in the UTF-8 body.
+    safe_title = title.encode("latin-1", "ignore").decode("latin-1").strip() or "Wallet alert"
     try:
         urllib.request.urlopen(urllib.request.Request(
             "https://ntfy.sh/"+TOPIC, data=message.encode("utf-8"),
-            headers={"Title": title, "Priority": "high", "Tags": tags, "User-Agent": UA}), timeout=20)
+            headers={"Title": safe_title, "Priority": "high", "Tags": tags, "User-Agent": UA}), timeout=20)
     except Exception as e: log(f"phone push failed: {e}")
 
 def notify_mac(title, message):
