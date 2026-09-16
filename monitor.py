@@ -31,7 +31,7 @@ QUOTE = {"So11111111111111111111111111111111111111112",   # WSOL
          "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}   # USDT
 THRESHOLD_USD   = 500.0
 ALERT_EVERY_BUY = True    # alert on EVERY real (paid) buy, any size, new or existing.
-ALERT_SELLS     = True    # alert when he swaps a token OUT for SOL/USDC (a sell), any size.
+ALERT_SELLS     = False   # sells NOT tracked (user 2026-09-16): buys + money-in only.
 ALERT_MONEY_IN  = True    # alert when SOL/USDC/USDT ARRIVES (not part of a buy/sell) — funding in.
 MONEYIN_USD_MIN = 1.0     # ignore sub-$ dust inflows / tiny sell proceeds.
 SOL_MINT  = "So11111111111111111111111111111111111111112"
