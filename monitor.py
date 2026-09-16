@@ -17,10 +17,10 @@ TOPIC = _topic()
 
 # Wallets to track. Add more dicts here to watch additional wallets.
 WALLETS = [
-    {"label": "DONJO",   "address": "5GmQHd4vQ2eeGHTr6ifEDYG8aHNxBiv14XK9cQvNvfGS"},
-    {"label": "FrankDOG","address": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ"},
-    {"label": "cryptodonprivFOMO1", "address": "8q8CUKExuHhNCiNYzWs8VEk5KCzWiy4mZZWg3q7xGGfE"},
-    {"label": "cryptodonPubPUMP1",  "address": "AAcnkt8u8NgZBAPY5eUTSSc4oeHZNfB6dXsV1yWf8YSC"},
+    {"label": "DONJO aka cryptodonPubPUMP1",  "address": "AAcnkt8u8NgZBAPY5eUTSSc4oeHZNfB6dXsV1yWf8YSC"},
+    {"label": "DONJO aka cryptodonpriv1",     "address": "5GmQHd4vQ2eeGHTr6ifEDYG8aHNxBiv14XK9cQvNvfGS"},
+    {"label": "DONJO aka cryptodonprivFOMO1", "address": "8q8CUKExuHhNCiNYzWs8VEk5KCzWiy4mZZWg3q7xGGfE"},
+    {"label": "FrankDOG", "address": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ"},
 ]
 RPC      = "https://api.mainnet-beta.solana.com"
 UA       = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
