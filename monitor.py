@@ -21,6 +21,9 @@ WALLETS = [
     {"label": "DONJO aka cryptodonpriv1",     "address": "5GmQHd4vQ2eeGHTr6ifEDYG8aHNxBiv14XK9cQvNvfGS"},
     {"label": "DONJO aka cryptodonprivFOMO1", "address": "8q8CUKExuHhNCiNYzWs8VEk5KCzWiy4mZZWg3q7xGGfE"},
     {"label": "FrankDOG", "address": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ"},
+    # NOT tracked (parked for reference — may belong to DONJO, unconfirmed):
+    # {"label": "DONJO VAULT 1 ?", "address": "EHcege7dok1iYs7SxL2XzDPvhg6XzMVcx2V5SkMUurJP"},
+    # {"label": "DONJO VAULT 2 ?", "address": "BNrYNyQZhdGRs8Rvi98WGTjhxab2wFTdGtVjW72RGyh4"},
 ]
 # address -> label, for detecting token transfers BETWEEN our own tracked wallets.
 TRACKED = {w["address"]: w["label"] for w in WALLETS}
