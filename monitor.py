@@ -22,6 +22,8 @@ WALLETS = [
     {"label": "DONJO aka cryptodonprivFOMO1", "address": "8q8CUKExuHhNCiNYzWs8VEk5KCzWiy4mZZWg3q7xGGfE"},
     {"label": "FrankDOG", "address": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ"},
 ]
+# address -> label, for detecting token transfers BETWEEN our own tracked wallets.
+TRACKED = {w["address"]: w["label"] for w in WALLETS}
 RPC      = "https://api.mainnet-beta.solana.com"
 UA       = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
@@ -33,6 +35,7 @@ THRESHOLD_USD   = 500.0
 ALERT_EVERY_BUY = True    # alert on EVERY real (paid) buy, any size, new or existing.
 ALERT_SELLS     = False   # sells NOT tracked (user 2026-09-16): buys + money-in only.
 ALERT_MONEY_IN  = True    # alert when SOL/USDC/USDT ARRIVES (not part of a buy/sell) — funding in.
+ALERT_INTERNAL_XFER = True # alert when a tracked wallet sends a token to ANOTHER tracked wallet.
 MONEYIN_USD_MIN = 1.0     # ignore sub-$ dust inflows / tiny sell proceeds.
 SOL_MINT  = "So11111111111111111111111111111111111111112"
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -162,6 +165,20 @@ def spl_sender(meta, wallet, mints):
         if d < drop: drop, cand = d, o
     return cand
 
+def token_recipients(meta, wallet, mint):
+    """Owners (≠wallet) whose balance of `mint` ROSE this tx = recipients of a transfer out."""
+    pre, post = {}, {}
+    for b in meta.get("preTokenBalances", []):
+        if b.get("mint")==mint and b.get("owner"): pre[b["owner"]]=pre.get(b["owner"],0.0)+(b["uiTokenAmount"]["uiAmount"] or 0.0)
+    for b in meta.get("postTokenBalances", []):
+        if b.get("mint")==mint and b.get("owner"): post[b["owner"]]=post.get(b["owner"],0.0)+(b["uiTokenAmount"]["uiAmount"] or 0.0)
+    out = []
+    for o in set(pre)|set(post):
+        if o == wallet: continue
+        d = post.get(o,0.0)-pre.get(o,0.0)
+        if d > 1e-9: out.append((o, d))
+    return out
+
 def native_sender(tx, wallet):
     """AccountKey (≠wallet) whose native SOL dropped most this tx = the SOL sender."""
     m = tx["meta"]; keys = [k["pubkey"] for k in tx["transaction"]["message"]["accountKeys"]]
@@ -266,6 +283,19 @@ def process_wallet(w, ws):
             log(f"[{label}] MONEY-IN {asset} (~${quote_in_usd:,.0f}) from {frm} at {ts} {sig}")
             alerts.append({"who":label,"money_in":True,"exch":exch,"src":src,"asset":asset,"usd":quote_in_usd,"ts":ts,"sig":sig})
 
+        # --- INTERNAL TRANSFER: a token left this wallet and landed in ANOTHER tracked wallet ---
+        if ALERT_INTERNAL_XFER and token_out:
+            for mint, dv in token_out:
+                if mint in QUOTE: continue
+                for owner, amt in token_recipients(tx["meta"], wallet, mint):
+                    if owner in TRACKED and owner != wallet:
+                        sym, price = dexscreener(mint); lbl = sym or (mint[:6]+"…")
+                        usd = amt*price if price else 0.0
+                        to_label = TRACKED[owner]
+                        log(f"[{label}] INTERNAL-XFER {amt:,.4f} {lbl} (~${usd:,.0f}) -> {to_label} at {ts} {sig}")
+                        alerts.append({"who":label,"xfer":True,"to":to_label,"to_addr":owner,
+                                       "sym":sym,"mint":mint,"amt":amt,"usd":usd,"ts":ts,"sig":sig})
+
     ws["seen"]=list(seen); ws["known_mints"]=list(known)
     if not alerts:
         log(f"[{label}] {len(new)} new txns, nothing alert-worthy (no new tokens, none ≥ ${THRESHOLD_USD:.0f}).")
@@ -293,6 +323,15 @@ def main():
             tags  = "moneybag,inbox_tray"
             body  = f"{who} received {a['asset']} ({usd}) from {frm} at {a['ts']}.\n{link}"
             banner = f"{a['asset']} from {frm}"
+        elif a.get("xfer"):                          # token moved to another tracked wallet
+            lbl = a["sym"] or (a["mint"][:8]+"…")
+            amt = f"{a['amt']:,.0f}" if a["amt"] >= 1 else f"{a['amt']:,.4f}"
+            kind = "XFER"
+            title = f"🔁 {who} sent {lbl} → {a['to']}"
+            tags  = "twisted_rightwards_arrows,eyes"
+            body  = (f"{who} sent {amt} {lbl} ({usd}) to {a['to']} at {a['ts']}.\n"
+                     f"Token: {a['mint']}\n{link}")
+            banner = f"{amt} {lbl} → {a['to']}"
         elif a.get("sell"):                          # token sold for SOL/USDC
             lbl = a["sym"] or (a["mint"][:8]+"…")
             kind = "SELL"
